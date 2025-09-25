@@ -4,6 +4,10 @@ from slack_sdk import WebClient
 from slack_sdk.signature import SignatureVerifier
 import json
 
+@app.route("/health", methods=["GET"])
+def health():
+    return {"status": "ok"}
+
 app = Flask(__name__)
 
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
