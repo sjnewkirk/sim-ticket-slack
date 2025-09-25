@@ -1,32 +1,25 @@
-import os
-from flask import Flask, request, make_response
-from slack_sdk import WebClient
-from slack_sdk.signature import SignatureVerifier
-import json
+from flask import Flask, request, jsonify
 
+# 1️⃣ Create the app object FIRST
+app = Flask(__name__)
+
+# 2️⃣ Define routes after app exists
 @app.route("/health", methods=["GET"])
 def health():
     return {"status": "ok"}
 
-app = Flask(__name__)
+@app.route("/slack/events", methods=["POST"])
+def slack_events():
+    data = request.form  # Slash commands come in form-encoded
+    user_id = data.get("user_id")
+    text = data.get("text")
+    response_url = data.get("response_url")
 
-SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
-SLACK_SIGNING_SECRET = os.environ["SLACK_SIGNING_SECRET"]
+    return jsonify({
+        "response_type": "in_channel",
+        "text": f"Slash command received from <@{user_id}> with text: {text}"
+    })
 
-client = WebClient(token=SLACK_BOT_TOKEN)
-verifier = SignatureVerifier(SLACK_SIGNING_SECRET)
-
-@app.route("/slack/command", methods=["POST"])
-def handle_command():
-    if not verifier.is_valid_request(request.get_data(), request.headers):
-        return make_response("invalid request", 403)
-    return make_response("Command received!", 200)
-
-@app.route("/slack/interactions", methods=["POST"])
-def handle_interactions():
-    if not verifier.is_valid_request(request.get_data(), request.headers):
-        return make_response("invalid request", 403)
-    return make_response("Interaction received!", 200)
-
+# 3️⃣ Optional local run
 if __name__ == "__main__":
     app.run(debug=True)
