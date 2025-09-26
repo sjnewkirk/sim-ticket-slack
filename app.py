@@ -14,6 +14,11 @@ SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
 client = WebClient(token=SLACK_BOT_TOKEN)
 verifier = SignatureVerifier(SLACK_SIGNING_SECRET)
 
+#Slack URL reroute
+@app.route("/slack/oauth_redirect", methods=["GET"])
+def slack_oauth_redirect():
+    return "Slack redirect OK", 200
+
 # Health check
 @app.route("/health", methods=["GET"])
 def health():
