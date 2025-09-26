@@ -4,6 +4,7 @@ from flask import Flask, request, jsonify
 from slack_sdk.web import WebClient
 from slack_sdk.signature import SignatureVerifier
 from urllib.parse import quote_plus
+from flask import jsonify
 
 app = Flask(__name__)
 
@@ -158,7 +159,8 @@ def slack_interactions():
             text=f"<@{user}> submitted a SIM Ticket: <{sim_url}|SIM Ticket>"
         )
 
-    return "", 200
+    return jsonify({"response_action": "clear"})
+
 
 
 if __name__ == "__main__":
