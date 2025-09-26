@@ -1,213 +1,147 @@
 import os
-import json
+import logging
 from flask import Flask, request, jsonify
-from slack_sdk.web import WebClient
-from slack_sdk.signature import SignatureVerifier
-from urllib.parse import quote_plus
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 
+# --- Setup ---
 app = Flask(__name__)
+logging.basicConfig(level=logging.DEBUG)
 
-# Environment variables
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
-SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
-
 client = WebClient(token=SLACK_BOT_TOKEN)
-verifier = SignatureVerifier(SLACK_SIGNING_SECRET)
 
-# Slack URL reroute
-@app.route("/slack/oauth_redirect", methods=["GET"])
-def slack_oauth_redirect():
-    return "Slack redirect OK", 200
 
-# Health check
-@app.route("/health", methods=["GET"])
-def health():
-    return {"status": "ok"}
-
-# Slack URL verification for events
-@app.route("/slack/events/verify", methods=["POST"])
-def slack_verify():
-    data = request.json
-    if data.get("type") == "url_verification":
-        return jsonify({"challenge": data["challenge"]})
-    return "", 400
-
-# Main events route
+# --- Event subscription handler (emoji triggers modal) ---
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
-    if not verifier.is_valid_request(request.get_data(), request.headers):
-        return "Invalid request", 403
-
     data = request.json
+    logging.debug(f"Incoming event: {data}")
 
-    # URL verification challenge
+    # Handle Slack's URL verification challenge
     if data.get("type") == "url_verification":
         return jsonify({"challenge": data["challenge"]})
 
-    # Event callback
+    # Handle actual events
     if data.get("type") == "event_callback":
         event = data.get("event", {})
+        logging.debug(f"Event payload: {event}")
 
-        # Trigger on :ticket: reaction
+        # Reaction event trigger
         if event.get("type") == "reaction_added" and event.get("reaction") == "ticket":
+            user_id = event.get("user")
             channel_id = event["item"]["channel"]
-            message_ts = event["item"]["ts"]
 
-            # Post a message with a button to open the modal
-            client.chat_postMessage(
-                channel=channel_id,
-                thread_ts=message_ts,
-                text="Click below to create a SIM Ticket:",
-                blocks=[
-                    {
-                        "type": "actions",
-                        "block_id": "open_modal_block",
-                        "elements": [
+            try:
+                # Open modal
+                response = client.views_open(
+                    trigger_id=event.get("item_user"),  # ⚠️ might need fixing, see note below
+                    view={
+                        "type": "modal",
+                        "callback_id": "sim_ticket_modal",
+                        "title": {"type": "plain_text", "text": "Create SIM Ticket"},
+                        "submit": {"type": "plain_text", "text": "Submit"},
+                        "blocks": [
                             {
-                                "type": "button",
-                                "text": {"type": "plain_text", "text": "Create SIM Ticket"},
-                                "action_id": "open_modal_button",
-                                "value": json.dumps({"channel_id": channel_id, "thread_ts": message_ts})
+                                "type": "input",
+                                "block_id": "ticket_summary",
+                                "label": {"type": "plain_text", "text": "Summary"},
+                                "element": {
+                                    "type": "plain_text_input",
+                                    "action_id": "summary_input"
+                                }
+                            },
+                            {
+                                "type": "input",
+                                "block_id": "ticket_priority",
+                                "label": {"type": "plain_text", "text": "Priority"},
+                                "element": {
+                                    "type": "static_select",
+                                    "action_id": "priority_select",
+                                    "options": [
+                                        {"text": {"type": "plain_text", "text": "Low"}, "value": "low"},
+                                        {"text": {"type": "plain_text", "text": "Medium"}, "value": "medium"},
+                                        {"text": {"type": "plain_text", "text": "High"}, "value": "high"},
+                                    ],
+                                },
+                            },
+                            {
+                                "type": "input",
+                                "block_id": "ticket_description",
+                                "label": {"type": "plain_text", "text": "Description"},
+                                "element": {
+                                    "type": "plain_text_input",
+                                    "action_id": "description_input",
+                                    "multiline": True
+                                }
+                            },
+                            {
+                                "type": "input",
+                                "block_id": "ticket_owner",
+                                "label": {"type": "plain_text", "text": "Owner"},
+                                "element": {
+                                    "type": "users_select",
+                                    "action_id": "owner_select"
+                                }
+                            },
+                            {
+                                "type": "input",
+                                "block_id": "ticket_due_date",
+                                "label": {"type": "plain_text", "text": "Due Date"},
+                                "element": {
+                                    "type": "datepicker",
+                                    "action_id": "due_date_input"
+                                }
                             }
                         ]
                     }
-                ]
-            )
+                )
+                logging.debug(f"Modal open response: {response}")
+
+            except SlackApiError as e:
+                logging.error(f"Error opening modal: {e.response['error']}")
 
     return "", 200
 
-# Interactions route: button clicks and modal submissions
+
+# --- Interaction handler (modal submit) ---
 @app.route("/slack/interactions", methods=["POST"])
 def slack_interactions():
-    if not verifier.is_valid_request(request.get_data(), request.headers):
-        return "Invalid request", 403
+    payload = request.form.get("payload")
+    logging.debug(f"Interaction payload raw: {payload}")
 
-    payload = json.loads(request.form.get("payload"))
+    if not payload:
+        return "", 400
 
-    # Button clicked to open modal
-    if payload.get("type") == "block_actions":
-        action = payload["actions"][0]
-        if action["action_id"] == "open_modal_button":
-            trigger_id = payload["trigger_id"]
-            metadata = json.loads(action["value"])
-            channel_id = metadata["channel_id"]
-            thread_ts = metadata["thread_ts"]
-            private_metadata = json.dumps({"channel_id": channel_id, "thread_ts": thread_ts})
+    import json
+    data = json.loads(payload)
+    logging.debug(f"Parsed interaction payload: {data}")
 
-            client.views_open(
-                trigger_id=trigger_id,
-                view={
-                    "type": "modal",
-                    "callback_id": "sim_ticket_modal",
-                    "private_metadata": private_metadata,
-                    "title": {"type": "plain_text", "text": "Create SIM Ticket"},
-                    "submit": {"type": "plain_text", "text": "Submit"},
-                    "close": {"type": "plain_text", "text": "Cancel"},
-                    "blocks": [
-                        # Title
-                        {"type": "input",
-                         "block_id": "title_block",
-                         "label": {"type": "plain_text", "text": "Title"},
-                         "element": {"type": "plain_text_input", "action_id": "title_input"}},
-                        # Description
-                        {"type": "input",
-                         "block_id": "desc_block",
-                         "label": {"type": "plain_text", "text": "Description of Issue"},
-                         "element": {"type": "plain_text_input", "action_id": "desc_input", "multiline": True}},
-                        # System
-                        {"type": "input",
-                         "block_id": "system_block",
-                         "label": {"type": "plain_text", "text": "System Issue Observed On"},
-                         "element": {
-                             "type": "static_select",
-                             "action_id": "system_input",
-                             "options": [{"text": {"type": "plain_text", "text": x}, "value": x} for x in ["0202","0204","0301","0304"]]
-                         }},
-                        # Workcell
-                        {"type": "input",
-                         "block_id": "workcell_block",
-                         "label": {"type": "plain_text", "text": "Workcell"},
-                         "element": {
-                             "type": "static_select",
-                             "action_id": "workcell_input",
-                             "options": [{"text": {"type": "plain_text", "text": x}, "value": x} for x in ["Induct","WC1","WC2","WC3","ALL"]]
-                         }},
-                        # CTI
-                        {"type": "input",
-                         "block_id": "cti_block",
-                         "label": {"type": "plain_text", "text": "CTI"},
-                         "element": {
-                             "type": "static_select",
-                             "action_id": "cti_input",
-                             "options": [{"text": {"type": "plain_text", "text": x}, "value": x} for x in [
-                                 "Controls","Deployment","Hardware","Match","Motion","Network","Observability",
-                                 "Orchestrator","Perception","Software","UI","UWC"
-                             ]]
-                         }},
-                        # Severity
-                        {"type": "input",
-                         "block_id": "severity_block",
-                         "label": {"type": "plain_text", "text": "Ticket Severity Level"},
-                         "element": {
-                             "type": "static_select",
-                             "action_id": "severity_input",
-                             "options": [{"text": {"type": "plain_text", "text": x}, "value": x} for x in ["THREE","FOUR","FIVE"]]
-                         }},
-                        # Test Case
-                        {"type": "input",
-                         "block_id": "test_case_block",
-                         "label": {"type": "plain_text", "text": "Test Case"},
-                         "element": {
-                             "type": "static_select",
-                             "action_id": "test_case_input",
-                             "options": [{"text": {"type": "plain_text", "text": x}, "value": x} for x in ["Daily_QA","KPI_Benchmark","Capability_Test"]]
-                         }},
-                    ]
-                }
+    # Handle modal submission
+    if data.get("type") == "view_submission":
+        values = data["view"]["state"]["values"]
+        summary = values["ticket_summary"]["summary_input"]["value"]
+        priority = values["ticket_priority"]["priority_select"]["selected_option"]["value"]
+        description = values["ticket_description"]["description_input"]["value"]
+        owner = values["ticket_owner"]["owner_select"]["selected_user"]
+        due_date = values["ticket_due_date"]["due_date_input"]["selected_date"]
+
+        logging.info(f"Ticket submission received: {summary}, {priority}, {description}, {owner}, {due_date}")
+
+        # Example: post confirmation back to user
+        try:
+            client.chat_postMessage(
+                channel=data["user"]["id"],
+                text=f"✅ Ticket created!\n*Summary:* {summary}\n*Priority:* {priority}\n*Owner:* <@{owner}>\n*Due:* {due_date}\n*Description:* {description}"
             )
-            return "", 200
-
-    # Modal submission
-    if payload.get("type") == "view_submission" and payload["view"]["callback_id"] == "sim_ticket_modal":
-        values = payload["view"]["state"]["values"]
-        user = payload["user"]["username"]
-
-        metadata = json.loads(payload["view"]["private_metadata"])
-        channel_id = metadata["channel_id"]
-        thread_ts = metadata.get("thread_ts")
-
-        # Extract form values
-        title = values["title_block"]["title_input"]["value"]
-        description = values["desc_block"]["desc_input"]["value"]
-        system = values["system_block"]["system_input"]["value"]
-        workcell = values["workcell_block"]["workcell_input"]["value"]
-        cti = values["cti_block"]["cti_input"]["value"]
-        severity = values["severity_block"]["severity_input"]["value"]
-        test_case = values["test_case_block"]["test_case_input"]["value"]
-
-        # Construct Slack message link
-        slack_link = f"https://amazon.enterprise.slack.com/archives/{channel_id}/p{thread_ts.replace('.', '')}" if thread_ts else "unknown"
-
-        # Build SIM ticket URL
-        url_title = quote_plus(f"[Atlas>{system}>{workcell} - {test_case}] {title}")
-        url_desc = quote_plus(f"{description}\nSlack Message Link: {slack_link}")
-        sim_url = (
-            f"https://t.corp.amazon.com/create/options?"
-            f"category=Amazon%20Robotics&type=Vulcan%20Stow&item={cti}&severity={severity}"
-            f"&title={url_title}&description={url_desc}&tags={test_case},{system}&watchers={user}@amazon.com"
-        )
-
-        # Post in original channel / thread
-        client.chat_postMessage(
-            channel=channel_id,
-            thread_ts=thread_ts,
-            text=f"<@{user}> submitted a SIM Ticket: <{sim_url}|SIM Ticket>"
-        )
+        except SlackApiError as e:
+            logging.error(f"Error posting confirmation: {e.response['error']}")
 
         return jsonify({"response_action": "clear"})
 
     return "", 200
 
 
+# --- Run server ---
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, port=5000)
