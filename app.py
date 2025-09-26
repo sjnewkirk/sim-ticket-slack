@@ -4,7 +4,6 @@ from flask import Flask, request, jsonify
 from slack_sdk.web import WebClient
 from slack_sdk.signature import SignatureVerifier
 from urllib.parse import quote_plus
-from flask import jsonify
 
 app = Flask(__name__)
 
@@ -15,7 +14,7 @@ SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
 client = WebClient(token=SLACK_BOT_TOKEN)
 verifier = SignatureVerifier(SLACK_SIGNING_SECRET)
 
-#Slack URL reroute
+# Slack URL reroute
 @app.route("/slack/oauth_redirect", methods=["GET"])
 def slack_oauth_redirect():
     return "Slack redirect OK", 200
@@ -25,7 +24,7 @@ def slack_oauth_redirect():
 def health():
     return {"status": "ok"}
 
-#For event subscription
+# Slack URL verification for events
 @app.route("/slack/events/verify", methods=["POST"])
 def slack_verify():
     data = request.json
@@ -33,96 +32,51 @@ def slack_verify():
         return jsonify({"challenge": data["challenge"]})
     return "", 400
 
-# Slash command
+# Main events route
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
     if not verifier.is_valid_request(request.get_data(), request.headers):
         return "Invalid request", 403
 
-    user_id = request.form.get("user_id")
-    trigger_id = request.form.get("trigger_id")
-    channel_id = request.form.get("channel_id")
-    thread_ts = request.form.get("thread_ts")  # optional if command in thread
+    data = request.json
 
-    # Pass channel + thread info via private_metadata
-    private_metadata = json.dumps({"channel_id": channel_id, "thread_ts": thread_ts})
+    # URL verification challenge
+    if data.get("type") == "url_verification":
+        return jsonify({"challenge": data["challenge"]})
 
-    # Open modal
-    client.views_open(
-        trigger_id=trigger_id,
-        view={
-            "type": "modal",
-            "callback_id": "sim_ticket_modal",
-            "private_metadata": private_metadata,
-            "title": {"type": "plain_text", "text": "Create SIM Ticket"},
-            "submit": {"type": "plain_text", "text": "Submit"},
-            "close": {"type": "plain_text", "text": "Cancel"},
-            "blocks": [
-                # Title
-                {"type": "input",
-                 "block_id": "title_block",
-                 "label": {"type": "plain_text", "text": "Title"},
-                 "element": {"type": "plain_text_input", "action_id": "title_input"}},
-                # Description
-                {"type": "input",
-                 "block_id": "desc_block",
-                 "label": {"type": "plain_text", "text": "Description of Issue"},
-                 "element": {"type": "plain_text_input", "action_id": "desc_input", "multiline": True}},
-                # System Issue Observed On
-                {"type": "input",
-                 "block_id": "system_block",
-                 "label": {"type": "plain_text", "text": "System Issue Observed On"},
-                 "element": {
-                     "type": "static_select",
-                     "action_id": "system_input",
-                     "options": [{"text": {"type": "plain_text", "text": x}, "value": x} for x in ["0202","0204","0301","0304"]]
-                 }},
-                # Workcell
-                {"type": "input",
-                 "block_id": "workcell_block",
-                 "label": {"type": "plain_text", "text": "Workcell"},
-                 "element": {
-                     "type": "static_select",
-                     "action_id": "workcell_input",
-                     "options": [{"text": {"type": "plain_text", "text": x}, "value": x} for x in ["Induct","WC1","WC2","WC3","ALL"]]
-                 }},
-                # CTI
-                {"type": "input",
-                 "block_id": "cti_block",
-                 "label": {"type": "plain_text", "text": "CTI"},
-                 "element": {
-                     "type": "static_select",
-                     "action_id": "cti_input",
-                     "options": [{"text": {"type": "plain_text", "text": x}, "value": x} for x in [
-                         "Controls","Deployment","Hardware","Match","Motion","Network","Observability",
-                         "Orchestrator","Perception","Software","UI","UWC"
-                     ]]
-                 }},
-                # Ticket Severity
-                {"type": "input",
-                 "block_id": "severity_block",
-                 "label": {"type": "plain_text", "text": "Ticket Severity Level"},
-                 "element": {
-                     "type": "static_select",
-                     "action_id": "severity_input",
-                     "options": [{"text": {"type": "plain_text", "text": x}, "value": x} for x in ["THREE","FOUR","FIVE"]]
-                 }},
-                # Test Case
-                {"type": "input",
-                 "block_id": "test_case_block",
-                 "label": {"type": "plain_text", "text": "Test Case"},
-                 "element": {
-                     "type": "static_select",
-                     "action_id": "test_case_input",
-                     "options": [{"text": {"type": "plain_text", "text": x}, "value": x} for x in ["Daily_QA","KPI_Benchmark","Capability_Test"]]
-                 }},
-            ]
-        }
-    )
+    # Event callback
+    if data.get("type") == "event_callback":
+        event = data.get("event", {})
+
+        # Trigger on :ticket: reaction
+        if event.get("type") == "reaction_added" and event.get("reaction") == "ticket":
+            channel_id = event["item"]["channel"]
+            message_ts = event["item"]["ts"]
+
+            # Post a message with a button to open the modal
+            client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=message_ts,
+                text="Click below to create a SIM Ticket:",
+                blocks=[
+                    {
+                        "type": "actions",
+                        "block_id": "open_modal_block",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "Create SIM Ticket"},
+                                "action_id": "open_modal_button",
+                                "value": json.dumps({"channel_id": channel_id, "thread_ts": message_ts})
+                            }
+                        ]
+                    }
+                ]
+            )
 
     return "", 200
 
-# Modal submission
+# Interactions route: button clicks and modal submissions
 @app.route("/slack/interactions", methods=["POST"])
 def slack_interactions():
     if not verifier.is_valid_request(request.get_data(), request.headers):
@@ -130,11 +84,94 @@ def slack_interactions():
 
     payload = json.loads(request.form.get("payload"))
 
+    # Button clicked to open modal
+    if payload.get("type") == "block_actions":
+        action = payload["actions"][0]
+        if action["action_id"] == "open_modal_button":
+            trigger_id = payload["trigger_id"]
+            metadata = json.loads(action["value"])
+            channel_id = metadata["channel_id"]
+            thread_ts = metadata["thread_ts"]
+            private_metadata = json.dumps({"channel_id": channel_id, "thread_ts": thread_ts})
+
+            client.views_open(
+                trigger_id=trigger_id,
+                view={
+                    "type": "modal",
+                    "callback_id": "sim_ticket_modal",
+                    "private_metadata": private_metadata,
+                    "title": {"type": "plain_text", "text": "Create SIM Ticket"},
+                    "submit": {"type": "plain_text", "text": "Submit"},
+                    "close": {"type": "plain_text", "text": "Cancel"},
+                    "blocks": [
+                        # Title
+                        {"type": "input",
+                         "block_id": "title_block",
+                         "label": {"type": "plain_text", "text": "Title"},
+                         "element": {"type": "plain_text_input", "action_id": "title_input"}},
+                        # Description
+                        {"type": "input",
+                         "block_id": "desc_block",
+                         "label": {"type": "plain_text", "text": "Description of Issue"},
+                         "element": {"type": "plain_text_input", "action_id": "desc_input", "multiline": True}},
+                        # System
+                        {"type": "input",
+                         "block_id": "system_block",
+                         "label": {"type": "plain_text", "text": "System Issue Observed On"},
+                         "element": {
+                             "type": "static_select",
+                             "action_id": "system_input",
+                             "options": [{"text": {"type": "plain_text", "text": x}, "value": x} for x in ["0202","0204","0301","0304"]]
+                         }},
+                        # Workcell
+                        {"type": "input",
+                         "block_id": "workcell_block",
+                         "label": {"type": "plain_text", "text": "Workcell"},
+                         "element": {
+                             "type": "static_select",
+                             "action_id": "workcell_input",
+                             "options": [{"text": {"type": "plain_text", "text": x}, "value": x} for x in ["Induct","WC1","WC2","WC3","ALL"]]
+                         }},
+                        # CTI
+                        {"type": "input",
+                         "block_id": "cti_block",
+                         "label": {"type": "plain_text", "text": "CTI"},
+                         "element": {
+                             "type": "static_select",
+                             "action_id": "cti_input",
+                             "options": [{"text": {"type": "plain_text", "text": x}, "value": x} for x in [
+                                 "Controls","Deployment","Hardware","Match","Motion","Network","Observability",
+                                 "Orchestrator","Perception","Software","UI","UWC"
+                             ]]
+                         }},
+                        # Severity
+                        {"type": "input",
+                         "block_id": "severity_block",
+                         "label": {"type": "plain_text", "text": "Ticket Severity Level"},
+                         "element": {
+                             "type": "static_select",
+                             "action_id": "severity_input",
+                             "options": [{"text": {"type": "plain_text", "text": x}, "value": x} for x in ["THREE","FOUR","FIVE"]]
+                         }},
+                        # Test Case
+                        {"type": "input",
+                         "block_id": "test_case_block",
+                         "label": {"type": "plain_text", "text": "Test Case"},
+                         "element": {
+                             "type": "static_select",
+                             "action_id": "test_case_input",
+                             "options": [{"text": {"type": "plain_text", "text": x}, "value": x} for x in ["Daily_QA","KPI_Benchmark","Capability_Test"]]
+                         }},
+                    ]
+                }
+            )
+            return "", 200
+
+    # Modal submission
     if payload.get("type") == "view_submission" and payload["view"]["callback_id"] == "sim_ticket_modal":
         values = payload["view"]["state"]["values"]
         user = payload["user"]["username"]
 
-        # Extract channel + thread from metadata
         metadata = json.loads(payload["view"]["private_metadata"])
         channel_id = metadata["channel_id"]
         thread_ts = metadata.get("thread_ts")
@@ -163,12 +200,13 @@ def slack_interactions():
         # Post in original channel / thread
         client.chat_postMessage(
             channel=channel_id,
-            thread_ts=thread_ts,  # None if not a thread
+            thread_ts=thread_ts,
             text=f"<@{user}> submitted a SIM Ticket: <{sim_url}|SIM Ticket>"
         )
 
-    return jsonify({"response_action": "clear"})
+        return jsonify({"response_action": "clear"})
 
+    return "", 200
 
 
 if __name__ == "__main__":
